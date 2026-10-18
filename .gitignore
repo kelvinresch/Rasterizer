@@ -1,0 +1,57 @@
+# Rasterizer — SDL2 software rasterizer (C++20, CMake + vcpkg)
+#
+# Scoped deliberately to three things: build output, restorable
+# dependencies, and machine-local editor state. Everything else is tracked.
+
+# ---- Build output ----
+# VS's CMake integration configures into out/; build/ covers CLI builds.
+[Oo]ut/
+[Bb]uild/
+
+# In-source CMake configure (easy to trigger by accident)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# ---- Dependencies ----
+# Restored from vcpkg.json + vcpkg-configuration.json on first configure.
+# ~200 MB of SDL2 sources and build trees — never commit this.
+vcpkg_installed/
+
+# ---- Visual Studio local state ----
+# Entirely machine-local. launch.vs.json deliberately lives at the repo root
+# instead of in here, so it stays tracked: it records the debugger's working
+# directory (${workspaceRoot}), which is what lets the program find its
+# assets at runtime. VS reads it from the root just fine.
+.vs/
+
+# VS per-user settings
+*.rsuser
+*.suo
+*.user
+*.userosscache
+
+# ---- Compiler / debugger artifacts ----
+# These normally land inside out/, but are listed to catch stray in-source builds.
+#
+# DELIBERATELY ABSENT: *.obj. In a C++ gitignore that means MSVC object files,
+# but this project's geometry (cube.obj, teapot.obj) are Wavefront OBJ models.
+# A blanket *.obj rule silently excludes the assets the renderer needs.
+# Real object files already live under out/ and build/ above.
+*.pdb
+*.ilk
+*.idb
+*.pch
+*.exp
+*.exe
+*.lib
+*.dll
+
+# ---- Editor / tooling ----
+# Machine-local only; a shared .claude/settings.json would still be tracked.
+.claude/settings.local.json
+
+# ---- OS cruft ----
+Thumbs.db
+desktop.ini
+.DS_Store
