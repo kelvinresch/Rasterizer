@@ -1,13 +1,21 @@
 ﻿// Rasterizer.cpp : Defines the entry point for the application.
-//
 
 #include "Rasterizer.h"
+#include "obj_reader.h"
 #include <iostream> // provides std::cout
+#include <fstream>
 #include <SDL2/SDL.h> // provides the screen and framebuffer
 #include <chrono>
 #include <numbers>
 #include <string>
 #include <sstream>
+#include <cstdint> // has fixed-width integer types
+#include <numeric> // provides std::inner_product
+#include <algorithm> // provides std::transform
+#include <random> // generates random numbers
+#include <cmath> // provides std::sin() and std::cos()
+#include <array> // provides std::array
+#include <vector> // provides std::vector
 
 // Height and Width of the image in pixels
 constexpr std::size_t ImageHeight = 256;
@@ -52,12 +60,16 @@ double msSince(Clock::time_point t0) {
 
 // An Image struct exists in pixel space. The View describes from where we want to take an image.
 struct View {
-	Image& image;
+	Image& image; // ImageHeight x ImageWidth array that stores colors
 
-	double x;
-	double y;
+	Vector3D position; // position that you're viewing from
+	Vector3D direction; // should be a unit vector describing where you're looking
+	const Vector3D x; // a vector that defines image height and the latitudinal direction of the image
+	const Vector3D y; // a vector that defines image width and the longitudinal direction of the image
+	// x and y need to be orthogonal to each other
 
-	double pitch;
+	double vertical_span; // the arc span of the height of the image in radians
+	double horizontal_span; // the arc span of the width of the image in radians
 };
 
 // Holds all the SDL stuff required for rendering a window.
@@ -79,12 +91,32 @@ double dot(const Vector2D& x, const Vector2D& y) {
 	return std::inner_product(x.begin(), x.end(), y.begin(), 0.0);
 }
 
-double cross_2d(const Vector2D& x, const Vector2D& y) {
+double dot(const Vector3D& x, const Vector3D& y) {
+	return std::inner_product(x.begin(), x.end(), y.begin(), 0.0);
+}
+
+double cross(const Vector2D& x, const Vector2D& y) {
 	return (x[0] * y[1]) - (x[1] * y[0]);
+}
+
+Vector3D cross(const Vector3D& x, const Vector3D& y) {
+	double a = x[1] * y[2] - y[1] * x[2];
+	double b = x[2] * y[0] - y[2] * x[0];
+	double c = x[0] * y[1] - y[0] * x[1];
+
+	Vector3D product = { a, b, c };
+	return product;
 }
 
 Vector2D add(const Vector2D& x, const Vector2D& y) {
 	Vector2D sum{};
+	std::transform(x.begin(), x.end(), y.begin(), sum.begin(),
+		[](double xn, double yn) {return xn + yn;});
+	return sum;
+}
+
+Vector3D add(const Vector3D& x, const Vector3D& y) {
+	Vector3D sum{};
 	std::transform(x.begin(), x.end(), y.begin(), sum.begin(),
 		[](double xn, double yn) {return xn + yn;});
 	return sum;
@@ -97,8 +129,24 @@ Vector2D subtract(const Vector2D& x, const Vector2D& y) {
 	return delta;
 }
 
+Vector3D subtract(const Vector3D& x, const Vector3D& y) {
+	Vector3D delta{};
+	std::transform(x.begin(), x.end(), y.begin(), delta.begin(),
+		[](double xn, double yn) {return xn - yn;});
+	return delta;
+}
+
 Vector2D scalar_mult(const Vector2D& x, const double s) {
-	Vector2D product = { x[0] * s, x[1] * s};
+	Vector2D product{};
+	std::transform(x.begin(), x.end(), product.begin(),
+		[s](double xn) {return xn * s;});
+	return product;
+}
+
+Vector3D scalar_mult(const Vector3D& x, const double s) {
+	Vector3D product{};
+	std::transform(x.begin(), x.end(), product.begin(),
+		[s](double xn) {return xn * s;});
 	return product;
 }
 
@@ -119,12 +167,21 @@ Vector2D rotate(const Vector2D& x, const double theta) {
 	return y;
 }
 
-Triangle2D move_triangle(const Triangle2D& t, const Vector2D& x) {
+Triangle2D translate_triangle(const Triangle2D& t, const Vector2D& x) {
 	Vector2D a = add(x, t[0]);
 	Vector2D b = add(x, t[1]);
 	Vector2D c = add(x, t[2]);
 
 	Triangle2D y = { a, b, c };
+	return y;
+}
+
+Triangle3D translate_triangle(const Triangle3D& t, const Vector3D& x) {
+	Vector3D a = add(x, t[0]);
+	Vector3D b = add(x, t[1]);
+	Vector3D c = add(x, t[2]);
+
+	Triangle3D y = { a, b, c };
 	return y;
 }
 
@@ -284,7 +341,7 @@ AABB find_AABB(Triangle2D t) {
 	return bounding_box;
 }
 
-int rasterize_triangles(View& view, std::vector<Triangle2D>& triangles, std::vector<Color>& colors) {
+int rasterize_triangles(View& view, std::vector<Triangle3D>& triangles, std::vector<Color>& colors) {
 	if (triangles.size() != colors.size()) {
 		std::cerr << "Number of triangles and number of colors needs to be the same!";
 		return 1;
@@ -295,50 +352,95 @@ int rasterize_triangles(View& view, std::vector<Triangle2D>& triangles, std::vec
 		//std::cout << i << "\n";
 
 		// First step is to convert the list of triangles given in world space into
-		// view space. 
-		Triangle2D viewed_triangle{};
-		for (std::size_t vertex = 0; vertex < 3; vertex++) {
-			viewed_triangle[vertex][0] = (triangles[i][vertex][0] - view.x) / view.pitch;
-			viewed_triangle[vertex][1] = (triangles[i][vertex][1] - view.y) / view.pitch;
-		}
+		// view space by subtracting the view position from the triangle.
+		Triangle3D viewed_triangle = translate_triangle(triangles[i], scalar_mult(view.position, -1.0));
 
+		// Next we need to project the triangle, now in view space, onto the view plane.
+		// This is still a mapping from R3 to R3
+		Vector3D a3d = scalar_mult(viewed_triangle[0], dot(view.direction, view.direction) / dot(viewed_triangle[0], view.direction));
+		Vector3D b3d = scalar_mult(viewed_triangle[1], dot(view.direction, view.direction) / dot(viewed_triangle[1], view.direction));
+		Vector3D c3d = scalar_mult(viewed_triangle[2], dot(view.direction, view.direction) / dot(viewed_triangle[2], view.direction));
 
-		//std::cout << "x1: " << viewed_triangle[0][0] << "\n";
-		//std::cout << "y1: " << viewed_triangle[0][1] << "\n";
-		//std::cout << "x2: " << viewed_triangle[1][0] << "\n";
-		//std::cout << "y2: " << viewed_triangle[1][1] << "\n";
-		//std::cout << "x3: " << viewed_triangle[2][0] << "\n";
-		//std::cout << "y3: " << viewed_triangle[2][1] << "\n";
+		// Now that the triangle, defined by a, b, and c, is in the view plane, we need to do a change of basis
+		// into the frame coordinates (R3 -> R2)
+		double x_len2 = dot(view.x, view.x);
+		double y_len2 = dot(view.y, view.y);
+		Vector2D a2d = { dot(view.x, a3d) / x_len2, dot(view.y, a3d) / y_len2 };
+		Vector2D b2d = { dot(view.x, b3d) / x_len2, dot(view.y, b3d) / y_len2 };
+		Vector2D c2d = { dot(view.x, c3d) / x_len2, dot(view.y, c3d) / y_len2 };
+
+		Triangle2D framed_triangle = { a2d, b2d, c2d }; 
+
+		// Now the triangle is in 2D coordinates in frame space. We now need to convert to pixel space
+		// which puts the origin at the bottom left corner instead of the center so that we don't
+		// ever iterate over negative pixel indices
+		Vector2D frame_center = { static_cast<double>(ImageWidth) / 2, static_cast<double>(ImageHeight) / 2 };
+		Triangle2D pixel_triangle = translate_triangle(framed_triangle, frame_center);
+
+		//std::cout << "Triangle: \n";
+
+		//std::cout << "vertex[0]: " << triangles[i][0][0] << " " << triangles[i][0][1] << " " << triangles[i][0][2] << "\n";
+		//std::cout << "vertex[1]: " << triangles[i][1][0] << " " << triangles[i][1][1] << " " << triangles[i][1][2] << "\n";
+		//std::cout << "vertex[2]: " << triangles[i][2][0] << " " << triangles[i][2][1] << " " << triangles[i][2][2] << "\n";
+
+		//std::cout << "viewed_triangle[0]: " << viewed_triangle[0][0] << " " << viewed_triangle[0][1] << " " << viewed_triangle[0][2] << "\n";
+		//std::cout << "viewed_triangle[1]: " << viewed_triangle[1][0] << " " << viewed_triangle[1][1] << " " << viewed_triangle[1][2] << "\n";
+		//std::cout << "viewed_triangle[2]: " << viewed_triangle[2][0] << " " << viewed_triangle[2][1] << " " << viewed_triangle[2][2] << "\n";
+
+		//std::cout << "a3d: " << a3d[0] << " " << a3d[1] << " " << a3d[2] << "\n";
+		//std::cout << "b3d: " << b3d[0] << " " << b3d[1] << " " << b3d[2] << "\n";
+		//std::cout << "c3d: " << c3d[0] << " " << c3d[1] << " " << c3d[2] << "\n";
+
+		//std::cout << "a2d: " << a2d[0] << " " << a2d[1] << "\n";
+		//std::cout << "b2d: " << b2d[0] << " " << b2d[1] << "\n";
+		//std::cout << "c2d: " << c2d[0] << " " << c2d[1] << "\n";
+
+		//std::cout << "view.x: " << view.x[0] << " " << view.x[1] << " " << view.x[2] << "\n";
+		//std::cout << "view.y: " << view.y[0] << " " << view.y[1] << " " << view.y[2] << "\n";
+
+		//std::cout << "dot(view.x, a3d) / x_len: " << dot(view.x, a3d) / x_len2 << "\n";
+		//std::cout << "dot(view.y, a3d) / ylen: " << dot(view.y, a3d) / y_len2 << "\n";
+
+		//std::cout << "x1: " << framed_triangle[0][0] << "\n";
+		//std::cout << "y1: " << framed_triangle[0][1] << "\n";
+		//std::cout << "x2: " << framed_triangle[1][0] << "\n";
+		//std::cout << "y2: " << framed_triangle[1][1] << "\n";
+		//std::cout << "x3: " << framed_triangle[2][0] << "\n";
+		//std::cout << "y3: " << framed_triangle[2][1] << "\n";
 
 		// For a given triangle, find the axis-aligned bounding box
-		AABB aabb = find_AABB(viewed_triangle);
+		AABB aabb = find_AABB(pixel_triangle);
 		// Once I find the bounding box of the triangle in view space, I need to
 		// translate that into pixel space
 
 		// Check that none of the box vertices are out of the view space window
+		double ImageWidth_d = static_cast<double>(ImageWidth);
+		double ImageHeight_d = static_cast<double>(ImageHeight);
+
+
 		if (aabb.xmin < 0) {
 			aabb.xmin = 0;
 		}
-		else if (aabb.xmin > ImageWidth) {
-			aabb.xmin = ImageWidth;
+		else if (aabb.xmin > ImageWidth_d) {
+			aabb.xmin = ImageWidth_d;
 		}
 		if (aabb.xmax < 0) {
 			aabb.xmax = 0;
 		}
-		else if (aabb.xmax >= ImageWidth) {
-			aabb.xmax = ImageWidth;
+		else if (aabb.xmax >= ImageWidth_d) {
+			aabb.xmax = ImageWidth_d;
 		}
 		if (aabb.ymin < 0) {
 			aabb.ymin = 0;
 		}
-		else if (aabb.ymin >= ImageHeight) {
-			aabb.ymin = ImageHeight;
+		else if (aabb.ymin >= ImageHeight_d) {
+			aabb.ymin = ImageHeight_d;
 		}
 		if (aabb.ymax < 0) {
 			aabb.ymax = 0;
 		}
-		else if (aabb.ymax >= ImageHeight) {
-			aabb.ymax = ImageHeight;
+		else if (aabb.ymax >= ImageHeight_d) {
+			aabb.ymax = ImageHeight_d;
 		}
 
 		//std::cout << "xmin: " << aabb.xmin << "\n";
@@ -347,15 +449,15 @@ int rasterize_triangles(View& view, std::vector<Triangle2D>& triangles, std::vec
 		//std::cout << "ymax: " << aabb.ymax << "\n";
 
 		// discretize the bounding box to move from view space to pixel space
-		std::size_t x_min_d = static_cast<std::size_t>(aabb.xmin);
-		std::size_t x_max_d = static_cast<std::size_t>(aabb.xmax);
-		std::size_t y_min_d = static_cast<std::size_t>(aabb.ymin);
-		std::size_t y_max_d = static_cast<std::size_t>(aabb.ymax);
+		int x_min_d = static_cast<int>(aabb.xmin);
+		int x_max_d = static_cast<int>(aabb.xmax);
+		int y_min_d = static_cast<int>(aabb.ymin);
+		int y_max_d = static_cast<int>(aabb.ymax);
 
-		for (std::size_t row = y_min_d; row < y_max_d; row++) {
-			for (std::size_t col = x_min_d; col < x_max_d; col++) {
+		for (int row = y_min_d; row < y_max_d; row++) {
+			for (int col = x_min_d; col < x_max_d; col++) {
 				Vector2D point = { static_cast<double>(col) + 0.5, static_cast<double>(row) + 0.5 };
-				if (in_triangle(point, viewed_triangle)) {
+				if (in_triangle(point, pixel_triangle)) {
 					view.image[row][col] = colors[i];
 				}
 			}
@@ -374,7 +476,7 @@ int read_geometry(const std::string filename, Geometry& geometry) {
 
 	std::string line{};
 	while (std::getline(file, line)) {
-		std::cout << line << "\n";
+		//std::cout << line << "\n";
 
 		std::stringstream ss(line);
 		// the linetype stores v, vn, f, g, or whatever else.
@@ -422,7 +524,6 @@ int read_geometry(const std::string filename, Geometry& geometry) {
 			geometry.normals.push_back(vn);
 		}
 		else if (linetype == "f") {
-			// f  1//2  7//2  5//2
 			// a face can have any number of vertices
 			Face3D face{};
 			std::string face_vertex;
@@ -483,12 +584,28 @@ int main(int argc, char* argv[])
 	
 	// create a discrete grid in pixel-space
 	Image image{};
-	View view = { image, -100, -100, 1 };
+	Vector3D position = { 0, 0, 300 };
+	Vector3D direction = { 0, 0, -1 };
+	Vector3D x = { 0, 1, 0 };
+	Vector3D y = { 1, 0, 0 };
+	double vertical_span = 1;
+	double horizontal_span = vertical_span / ImageHeight * ImageWidth;
+	x = scalar_mult(x, std::tan(vertical_span / 2) / ImageHeight);
+	y = scalar_mult(y, std::tan(horizontal_span / 2) / ImageWidth);
+	View view = {
+		image = image,
+		position = position,
+		direction = direction,
+		x = x,
+		y = y,
+		vertical_span = vertical_span,
+		horizontal_span = horizontal_span
+		};
 
 	std::random_device rd;
 	std::mt19937 gen(rd());
 
-	std::vector<Triangle2D> triangles{};
+	std::vector<Triangle3D> triangles{};
 	std::vector<Color> colors{};
 
 	bool running = true;
@@ -500,8 +617,8 @@ int main(int argc, char* argv[])
 	double ms = msSince(t0);
 
 	Geometry geometry{};
-	read_geometry("teapot.obj", geometry);
-	print_geometry(geometry);
+	read_geometry("assets/teapot.obj", geometry);
+	//print_geometry(geometry);
 
 	// Turn the geometry into a list of triangles.
 	for (const Face3D f : geometry.faces) {
@@ -510,15 +627,7 @@ int main(int argc, char* argv[])
 							geometry.vertices[f.vertices[2] - 1]
 		};
 		
-		// This step should be a projection from world space (3D)
-		// to view space (3D) but instead I'm projecting into
-		// view space but arbitrarily ordering the triangles, not
-		//// taking into account their distance from the viewer.
-		Vector2D a = { triangle3d[0][0], triangle3d[0][1] };
-		Vector2D b = { triangle3d[1][0], triangle3d[1][1] };
-		Vector2D c = { triangle3d[2][0], triangle3d[2][1] };
-		Triangle2D triangle2d = { a, b, c };
-		triangles.push_back(triangle2d);
+		triangles.push_back(triangle3d);
 		colors.push_back(random_color(gen));
 	}
 

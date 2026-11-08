@@ -14,7 +14,7 @@ project ("Rasterizer")
 find_package(SDL2 CONFIG REQUIRED)
 
 # Add source to this project's executable.
-add_executable (Rasterizer "Rasterizer.cpp" "Rasterizer.h" "BinaryWriter.cpp" "BinaryWriter.h")
+add_executable (Rasterizer "Rasterizer.cpp" "Rasterizer.h" "obj_reader.cpp" "obj_reader.h")
 
 target_link_libraries(Rasterizer PRIVATE SDL2::SDL2main SDL2::SDL2)
 
